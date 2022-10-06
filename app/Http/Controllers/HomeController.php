@@ -4,6 +4,9 @@ namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
 use App\Models\Memo;
+use App\Models\Tag;
+use App\Models\MemoTag;
+use DB;
 class HomeController extends Controller
 {
     /**
@@ -25,29 +28,77 @@ class HomeController extends Controller
     {
         $memos = Memo::select('memos.*')->where('user_id','=', \Auth::id())->whereNull('deleted_at')->orderBy('updated_at','DESC')->get();
 
-        return view('create',compact('memos'));
+        $tags = Tag::where('user_id','=',\Auth::id())->whereNull('deleted_at')->orderBy('id','DESC')->get();
+
+        return view('create',compact('memos','tags'));
     }
 
     public function store(Request $request)
     {
         $posts = $request->all();
-        Memo::insert(["content"=>$posts["content"],'user_id'=>\Auth::id()]);
+        DB::transaction(function() use($posts) {
+            $memo_id = Memo::insertGetId(["content"=>$posts["content"],'user_id'=>\Auth::id()]);
+            $tag_exist = Tag::where('user_id','=',\Auth::id())->where('name','=',$posts['new_tag'])->exists();
+            if( !empty($posts['new_tag']) && !$tag_exist){
+                $tag_id = Tag::insertGetId(['user_id'=>\Auth::id(),'name'=>$posts['new_tag']]);
+                MemoTag::insert(['memo_id'=>$memo_id,'tag_id'=>$tag_id]);
+            }
+            if(!empty($posts['tags'][0])){
+                foreach($posts['tags'] as $tag){
+                    MemoTag::insert(['memo_id' => $memo_id, 'tag_id' => $tag]);
+                }
+            }
+        });
+        
         return redirect(route("home"));
+
     }
 
     public function edit($id)
     {
         $memos = Memo::select('memos.*')->where('user_id','=', \Auth::id())->whereNull('deleted_at')->orderBy('updated_at','DESC')->get();
 
-        $edit_memo = Memo::find($id);
-        return view('edit',compact('memos','edit_memo'));
+        $edit_memo = Memo::select('memos.*','tags.id AS tag_id')->leftJoin('memo_tags','memo_tags.memo_id','=','memos.id')->leftJoin('tags','memo_tags.tag_id','=','tags.id')->where('memos.user_id','=', \Auth::id())->whereNull('memos.deleted_at')
+        ->where('memos.id','=',$id)
+        ->get();
+        $include_tags = [];
+        foreach($edit_memo as $memo ){
+            array_push($include_tags,$memo["tag_id"]);
+        }
+        $tags = Tag::where('user_id','=',\Auth::id())->whereNull('deleted_at')->orderBy('id','DESC')->get();
+
+        return view('edit',compact('memos','edit_memo','include_tags','tags'));
     }
 
     public function update(Request $request)
     {
         $posts = $request->all();
-        Memo::where('id', $posts['memo_id'])->update(["content"=>$posts["content"]]);
-        return redirect(route("home"));
+        $request->validate([ 'content' => 'required']);
+        // トランザクションスタート
+        DB::transaction(function () use($posts){
+            Memo::where('id', $posts['memo_id'])->update(['content' => $posts['content']]);
+            // 一旦メモとタグの紐付けを削除
+            MemoTag::where('memo_id', '=', $posts['memo_id'])->delete();
+            // 再度メモとタグの紐付け
+            if (!empty($posts['tags'])) {
+                foreach($posts['tags'] as $tag) {
+                    MemoTag::insert(['memo_id' => $posts['memo_id'], 'tag_id' => $tag]);
+                }
+            }
+            // 新規タグが入力されているかチェック
+            // もし、新しいタグの入力があれば、インサートして紐付ける
+            $tag_exists = Tag::where('user_id', '=', \Auth::id())->where('name', '=', $posts['new_tag'])->exists(); 
+            // 新規タグが既にtagsテーブルに存在するのかチェック
+            if( !empty($posts['new_tag']) && !$tag_exists ){
+                // 新規タグが既に存在しなければ、tagsテーブルにインサート→IDを取得
+                $tag_id = Tag::insertGetId(['user_id' => \Auth::id(), 'name' => $posts['new_tag']]);
+                // memo_tagsにインサートして、メモとタグを紐付ける
+                MemoTag::insert(['memo_id' => $posts['memo_id'], 'tag_id' => $tag_id]);
+            }
+        });
+        // トランザクションここまで
+
+        return redirect( route('home') );
     }
 
     public function destroy(Request $request)
@@ -56,5 +107,6 @@ class HomeController extends Controller
         Memo::where('id', $posts['memo_id'])->update(["deleted_at"=> date("Y-m-d H:i:s",time())]);
         return redirect(route("home"));
     }
+
 
 }
